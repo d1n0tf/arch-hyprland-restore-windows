@@ -1,0 +1,12 @@
+[Unit]
+Description=Hyprland Restore Windows
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/hypr-restore-windows.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
