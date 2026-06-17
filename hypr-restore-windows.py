@@ -36,6 +36,11 @@ RESTORE_DISABLE_ANIMATIONS = False
 RESTORE_MOVE_MIN_WIDTH = 1600
 RESTORE_MOVE_MIN_HEIGHT = 800
 
+# Heuristics for ignoring transient helper windows, such as Electron tooltips/popovers.
+AUX_WINDOW_MAX_WIDTH_RATIO = 0.55
+AUX_WINDOW_MAX_HEIGHT_RATIO = 0.55
+AUX_WINDOW_MAX_AREA_RATIO = 0.35
+
 STATE_EVENTS = {
     "closewindow",
     "movewindow",
@@ -180,6 +185,45 @@ def window_matches_state(client, saved_state):
     return True
 
 
+def window_area(client):
+    geom = extract_geom(client)
+    if not geom:
+        return 0
+    return geom["w"] * geom["h"]
+
+
+def looks_like_aux_window(client, reference_state):
+    ref_geom = (reference_state or {}).get("geom") or {}
+    current_geom = extract_geom(client)
+    if not ref_geom or not current_geom:
+        return False
+
+    width_ratio = current_geom["w"] / max(ref_geom.get("w", 1), 1)
+    height_ratio = current_geom["h"] / max(ref_geom.get("h", 1), 1)
+    area_ratio = (
+        (current_geom["w"] * current_geom["h"])
+        / max(ref_geom.get("w", 1) * ref_geom.get("h", 1), 1)
+    )
+    return (
+        width_ratio <= AUX_WINDOW_MAX_WIDTH_RATIO
+        and height_ratio <= AUX_WINDOW_MAX_HEIGHT_RATIO
+        and area_ratio <= AUX_WINDOW_MAX_AREA_RATIO
+    )
+
+
+def choose_primary_client(clients_for_class):
+    def client_score(client):
+        return (
+            client.get("mapped", True),
+            client.get("visible", True),
+            client.get("acceptsInput", True),
+            not client.get("hidden", False),
+            window_area(client),
+        )
+
+    return max(clients_for_class, key=client_score, default=None)
+
+
 async def hyprctl(*args):
     proc = await asyncio.create_subprocess_exec(
         "hyprctl",
@@ -272,6 +316,7 @@ async def persist_visible_state(reason):
         changed = False
         now = time.time()
         changed_keys = []
+        grouped = {}
 
         for client in await clients():
             key = class_key(client)
@@ -279,8 +324,16 @@ async def persist_visible_state(reason):
                 continue
             if key in restoring_keys:
                 continue
+            grouped.setdefault(key, []).append(client)
 
-            entry = build_state_entry(client, now)
+        for key, clients_for_class in grouped.items():
+            primary_client = choose_primary_client(clients_for_class)
+            if not primary_client:
+                continue
+            if looks_like_aux_window(primary_client, state.get(key)):
+                continue
+
+            entry = build_state_entry(primary_client, now)
             if same_state_entry(state.get(key), entry):
                 continue
 
@@ -375,6 +428,9 @@ async def restore_window(addr):
                         logging.info("RESTORE SKIP %s class=%s no saved state", addr, key)
                         return
                     saved_state = copy.deepcopy(current_state)
+                    if looks_like_aux_window(client, saved_state):
+                        logging.info("RESTORE SKIP %s class=%s helper-like window", addr, key)
+                        return
                     restore_key = key
                     restoring_keys.add(key)
                     if RESTORE_DISABLE_ANIMATIONS:
