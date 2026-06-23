@@ -98,35 +98,10 @@ On move, workspace, floating/fullscreen events, and during the periodic fallback
 
 There are two kinds of exclusions:
 
-- built-in exclusions from the script, such as `waybar`, `mako`, `wofi`, and `steam`;
+- built-in exclusions from the script, such as `waybar`, `mako`, `wofi`, `steam` etc.
 - dynamic exclusions saved in `hypr-restore-windows.config.json`.
 
 Built-in exclusions cannot be removed through the CLI. Dynamic exclusions can be added and removed at runtime.
-
-## Git
-
-Usually worth committing:
-
-- `README.md`
-- `hypr-restore-windows.py`
-- `hypr-window-memory.service`
-- `hypr-restore-windows.config.json`, if you want to version your exclusions
-
-Usually not worth committing:
-
-- `hypr-restore-windows.control.sock`
-- `hypr-restore-windows.state.json`
-- `__pycache__/`
-- `*.pyc`
-
-Suggested `.gitignore`:
-
-```gitignore
-*.sock
-*.state.json
-__pycache__/
-*.pyc
-```
 
 ## Moving The Project
 
