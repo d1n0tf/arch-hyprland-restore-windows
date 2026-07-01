@@ -64,7 +64,6 @@ DEFAULT_IGNORE_CLASSES = {
     "xdg-desktop-portal-hyprland",
     "nm-applet",
     "org.gnome.gThumb",
-    "steam",
 }
 
 running = True
@@ -74,6 +73,7 @@ pending_state_sync_task = None
 state_sync_lock = None
 control_lock = None
 restoring_keys = set()
+primary_clients = {}
 
 
 def load_state():
@@ -158,6 +158,10 @@ def lua_quote(value):
 
 def class_key(client):
     return (client.get("initialClass") or client.get("class") or "").strip()
+
+
+def client_address(client):
+    return normalize_addr(client.get("address", ""))
 
 
 def extract_geom(client):
@@ -277,6 +281,77 @@ def choose_primary_client(clients_for_class):
     return max(clients_for_class, key=client_score, default=None)
 
 
+def clients_for_class(clients_list, key):
+    return [client for client in clients_list if class_key(client) == key]
+
+
+def primary_candidates(clients_for_class, reference_state=None):
+    candidates = [client for client in clients_for_class if client_address(client)]
+    if reference_state:
+        non_aux = [
+            client
+            for client in candidates
+            if not looks_like_aux_window(client, reference_state)
+        ]
+        if non_aux:
+            return non_aux
+    return candidates
+
+
+def remember_primary_client(key, clients_for_class, preferred_addr=None, reference_state=None):
+    candidates = primary_candidates(clients_for_class, reference_state)
+    if not candidates:
+        primary_clients.pop(key, None)
+        return None
+
+    tracked_addr = normalize_addr(primary_clients.get(key, ""))
+    for client in candidates:
+        if client_address(client) == tracked_addr:
+            return client
+
+    preferred_addr = normalize_addr(preferred_addr) if preferred_addr else ""
+    chosen = None
+    if preferred_addr:
+        for client in candidates:
+            if client_address(client) != preferred_addr:
+                chosen = client
+                break
+        if chosen is None:
+            for client in candidates:
+                if client_address(client) == preferred_addr:
+                    chosen = client
+                    break
+
+    if chosen is None:
+        chosen = candidates[0]
+
+    primary_clients[key] = client_address(chosen)
+    return chosen
+
+
+def prune_primary_clients(grouped_clients):
+    for key in list(primary_clients):
+        if key in restoring_keys:
+            continue
+        tracked_addr = normalize_addr(primary_clients.get(key, ""))
+        if not any(
+            client_address(client) == tracked_addr
+            for client in grouped_clients.get(key, [])
+        ):
+            primary_clients.pop(key, None)
+
+
+def is_primary_client(key, client, clients_list, reference_state=None):
+    current_addr = client_address(client)
+    primary_client = remember_primary_client(
+        key,
+        clients_for_class(clients_list, key),
+        preferred_addr=current_addr,
+        reference_state=reference_state,
+    )
+    return bool(primary_client and client_address(primary_client) == current_addr)
+
+
 async def hyprctl(*args):
     proc = await asyncio.create_subprocess_exec(
         "hyprctl",
@@ -379,8 +454,14 @@ async def persist_visible_state(reason):
                 continue
             grouped.setdefault(key, []).append(client)
 
+        prune_primary_clients(grouped)
+
         for key, clients_for_class in grouped.items():
-            primary_client = choose_primary_client(clients_for_class)
+            primary_client = remember_primary_client(
+                key,
+                clients_for_class,
+                reference_state=state.get(key),
+            )
             if not primary_client:
                 continue
             if looks_like_aux_window(primary_client, state.get(key)):
@@ -611,6 +692,7 @@ async def handle_control_request(request):
                 "pending_state_sync": bool(
                     pending_state_sync_task and not pending_state_sync_task.done()
                 ),
+                "primary_clients": dict(sorted(primary_clients.items())),
                 "restoring": sorted(restoring_keys),
                 "saved_classes": len(state),
                 "state_file": str(STATE_FILE),
@@ -769,13 +851,21 @@ async def restore_window(addr):
 
                 if saved_state is None:
                     current_state = state.get(key)
+                    if current_state and looks_like_aux_window(client, current_state):
+                        logging.info("RESTORE SKIP %s class=%s helper-like window", addr, key)
+                        return
+                    if not is_primary_client(key, client, clients_list, current_state):
+                        logging.info(
+                            "RESTORE SKIP %s class=%s duplicate primary=%s",
+                            addr,
+                            key,
+                            primary_clients.get(key, ""),
+                        )
+                        return
                     if not current_state:
                         logging.info("RESTORE SKIP %s class=%s no saved state", addr, key)
                         return
                     saved_state = copy.deepcopy(current_state)
-                    if looks_like_aux_window(client, saved_state):
-                        logging.info("RESTORE SKIP %s class=%s helper-like window", addr, key)
-                        return
                     restore_key = key
                     restoring_keys.add(key)
                     if RESTORE_DISABLE_ANIMATIONS:
